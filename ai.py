@@ -52,13 +52,40 @@ MODELS_FREE = {
     "claude": "claude-3-haiku"
 }
 
-# Explicit Provider mappings for Zero-Auth stability
-FREE_PROVIDER_MAPPINGS = {
-    "gpt-4o-mini": g4f.Provider.OperaAria,
-    "qwen": g4f.Provider.Qwen_Qwen_3,
-    "llama3.3": None,  # Let g4f auto-select working provider for Llama 3.3
-    "claude": None     # Let g4f auto-select working provider for Claude
-}
+# Known working zero-auth providers to use as fallbacks
+def get_fallback_providers(model_alias):
+    # A list of string names for robust free providers
+    provider_names = [
+        "Blackbox",
+        "DDG",
+        "PollinationsAI",
+        "Jmuz",
+        "DeepInfraChat",
+        "HuggingChat",
+        "OperaAria",
+        "Qwen_Qwen_3"
+    ]
+    
+    providers = []
+    
+    # Priority providers based on model
+    if model_alias == "gpt-4o-mini":
+        if hasattr(g4f.Provider, "OperaAria"):
+            providers.append(g4f.Provider.OperaAria)
+    elif model_alias == "qwen":
+        if hasattr(g4f.Provider, "Qwen_Qwen_3"):
+            providers.append(g4f.Provider.Qwen_Qwen_3)
+            
+    for name in provider_names:
+        if hasattr(g4f.Provider, name):
+            p = getattr(g4f.Provider, name)
+            if p not in providers:
+                providers.append(p)
+                
+    # Add None at the end to let g4f auto-select its internal fallback RetryProvider
+    providers.append(None)
+    
+    return providers
 
 # Helpers for History Management
 def load_history():
@@ -158,34 +185,58 @@ class AIQueryEngine:
 
     def query(self, messages, model_alias):
         actual_model = self.get_actual_model_name(model_alias)
-        provider = FREE_PROVIDER_MAPPINGS.get(model_alias)
+        providers_to_try = get_fallback_providers(model_alias)
         
-        # g4f Zero-Auth streaming query using explicitly mapped reliable providers
-        try:
-            response = self.client.chat.completions.create(
-                model=actual_model,
-                provider=provider,
-                messages=messages,
-                stream=True
-            )
-            for chunk in response:
-                content = safe_extract_content(chunk)
-                if content is not None:
-                    yield content
-        except Exception as e:
-            # If explicit provider fails, try general auto-fallback
+        last_error = None
+        
+        for provider in providers_to_try:
             try:
+                # Attempt to create the chat completion with the current provider
                 response = self.client.chat.completions.create(
                     model=actual_model,
+                    provider=provider,
                     messages=messages,
                     stream=True
                 )
-                for chunk in response:
+                
+                # Fetch chunks, tracking if any yielded
+                iterator = iter(response)
+                
+                # Try to get the first chunk (this will often raise MissingAuthError if broken)
+                try:
+                    first_chunk = next(iterator)
+                except StopIteration:
+                    last_error = "Provider returned empty response."
+                    continue
+                    
+                first_content = safe_extract_content(first_chunk)
+                yielded_any = False
+                
+                if first_content is not None:
+                    yield first_content
+                    yielded_any = True
+                    
+                # If first chunk succeeded, continue streaming the rest
+                for chunk in iterator:
                     content = safe_extract_content(chunk)
                     if content is not None:
                         yield content
-            except Exception as fallback_err:
-                yield f"\n[error]Error in Free Provider Query: {fallback_err}[/error]\nSome providers might be temporarily offline. Please try switching models (e.g. /model qwen or /model gpt-4o-mini)."
+                        yielded_any = True
+                        
+                # If we yielded anything, we consider this provider a success
+                if yielded_any:
+                    return
+                else:
+                    last_error = "Provider yielded no text content."
+                    continue
+                    
+            except Exception as e:
+                # E.g. MissingAuthError, 401 Unauthorized, ConnectionError
+                last_error = str(e)
+                continue
+                
+        # If all providers fail
+        yield f"\n[error]Error: All zero-auth providers failed. Last error: {last_error}[/error]\nPlease try switching models (e.g., /model qwen or /model gpt-4o-mini)."
 
 # Gorgeous Welcome Banner
 def print_welcome_banner(engine, model):
