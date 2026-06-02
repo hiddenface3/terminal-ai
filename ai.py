@@ -213,6 +213,18 @@ class AIQueryEngine:
                 yielded_any = False
                 
                 if first_content is not None:
+                    # Detect fake success where provider returns backend error strings as content
+                    error_signatures = [
+                        "NoneType' object has no attribute",
+                        "color: var(--color-red",
+                        "Invalid model or alias",
+                        "API key is required",
+                        "Something went wrong"
+                    ]
+                    if any(sig in first_content for sig in error_signatures):
+                        last_error = f"Provider returned internal error: {first_content.strip()}"
+                        continue
+                        
                     yield first_content
                     yielded_any = True
                     
