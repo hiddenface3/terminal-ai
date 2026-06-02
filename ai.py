@@ -56,8 +56,8 @@ MODELS_FREE = {
 FREE_PROVIDER_MAPPINGS = {
     "gpt-4o-mini": g4f.Provider.OperaAria,
     "qwen": g4f.Provider.Qwen_Qwen_3,
-    "llama3.3": g4f.Provider.Qwen_Qwen_3,  # Qwen acts as a robust general proxy
-    "claude": g4f.Provider.OperaAria
+    "llama3.3": None,  # Let g4f auto-select working provider for Llama 3.3
+    "claude": None     # Let g4f auto-select working provider for Claude
 }
 
 # Helpers for History Management
@@ -114,6 +114,36 @@ def encode_image(image_path):
         console.print(f"[error]Failed to read/encode image: {e}[/error]")
         return None
 
+# Robust content extraction from stream chunks (handles None, strings, dicts, and OpenAI response objects)
+def safe_extract_content(chunk):
+    if chunk is None:
+        return None
+    
+    # 1. Handle raw string chunks (sometimes yielded by simple providers)
+    if isinstance(chunk, str):
+        return chunk
+        
+    # 2. Handle dictionary-style chunks
+    if isinstance(chunk, dict):
+        try:
+            return chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+        except Exception:
+            return None
+            
+    # 3. Handle standard OpenAI ChatCompletionChunk objects
+    try:
+        if hasattr(chunk, 'choices') and chunk.choices:
+            choice = chunk.choices[0]
+            if hasattr(choice, 'delta') and choice.delta:
+                if hasattr(choice.delta, 'content'):
+                    return choice.delta.content
+                elif isinstance(choice.delta, dict):
+                    return choice.delta.get("content")
+    except Exception:
+        pass
+        
+    return None
+
 # Query Engine
 class AIQueryEngine:
     def __init__(self):
@@ -139,7 +169,7 @@ class AIQueryEngine:
                 stream=True
             )
             for chunk in response:
-                content = chunk.choices[0].delta.content
+                content = safe_extract_content(chunk)
                 if content is not None:
                     yield content
         except Exception as e:
@@ -151,7 +181,7 @@ class AIQueryEngine:
                     stream=True
                 )
                 for chunk in response:
-                    content = chunk.choices[0].delta.content
+                    content = safe_extract_content(chunk)
                     if content is not None:
                         yield content
             except Exception as fallback_err:
